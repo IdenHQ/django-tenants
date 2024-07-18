@@ -1,12 +1,12 @@
 import os
 from contextlib import ContextDecorator
-from functools import lru_cache
+from functools import lru_cache, wraps
+from types import ModuleType
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
-from django.db import connections, DEFAULT_DB_ALIAS, connection
+from django.db import DEFAULT_DB_ALIAS, connection, connections
 from django.utils.module_loading import import_string
-
 
 try:
     from django.apps import apps
@@ -35,6 +35,15 @@ def get_public_schema_name():
 
 def get_tenant_types():
     return getattr(settings, 'TENANT_TYPES', {})
+
+
+def get_tenant_base_migrate_command_class():
+    class_path = getattr(
+        settings,
+        'TENANT_BASE_MIGRATE_COMMAND',
+        'django.core.management.commands.migrate.Command',
+    )
+    return import_string(class_path)
 
 
 def has_multi_type_tenants():
@@ -210,7 +219,8 @@ def schema_rename(tenant, new_schema_name, database=get_tenant_database_alias(),
         raise ValidationError("New schema name already exists")
     if not is_valid_schema_name(new_schema_name):
         raise ValidationError("Invalid string used for the schema name.")
-    sql = 'ALTER SCHEMA {0} RENAME TO {1}'.format(tenant.schema_name, new_schema_name)
+    sql = 'ALTER SCHEMA {0} RENAME TO {1}'.format(connection.ops.quote_name(tenant.schema_name),
+                                                  connection.ops.quote_name(new_schema_name))
     cursor.execute(sql)
     cursor.close()
     tenant.schema_name = new_schema_name
@@ -219,12 +229,28 @@ def schema_rename(tenant, new_schema_name, database=get_tenant_database_alias(),
 
 
 @lru_cache(maxsize=128)
-def get_app_label(string):
-    candidate = string.split(".")[-1]
+def get_app_label(app):
+    from django.apps import apps  # Ensure app registry is imported
+
+    candidate = app.split(".")[-1]
+
     try:
-        return getattr(import_string(string), "name", candidate)  # AppConfig
+        imported_app = import_string(app)
     except ImportError:
         return candidate
+
+    app_name = app if isinstance(imported_app, ModuleType) else imported_app.name
+
+    app_label = [
+        app_config.label
+        for app_config in apps.get_app_configs()
+        if app_config.name == app_name
+    ]
+
+    if len(app_label) != 1:
+        return candidate
+
+    return app_label[0]
 
 
 def app_labels(apps_list):
@@ -283,3 +309,40 @@ def validate_extra_extensions():
 
         # Make sure the connection used for the check is not reused and doesn't stay idle.
         connection.close()
+
+
+def tenant_migration(*args, tenant_schema=True, public_schema=False):
+    """
+    Decorator to control which schemas a data migration will execute on.
+    
+    :param tenant_schema: If True (default), the data migration will execute on the tenant schema(s).
+    :param public_schema: If True, the data migration will execute on the public schema.
+
+    :return: None
+    """
+
+    def _tenant_migration(func):
+        @wraps(func)
+        def wrapper(*_args, **kwargs):
+            try:
+                _, schema_editor = _args  # noqa
+            except Exception as excp:
+                raise Exception(f'Decorator requires apps & schema_editor as positional arguments: {excp}')
+
+            if ((tenant_schema and schema_editor.connection.schema_name != get_public_schema_name()) or
+                    (public_schema and schema_editor.connection.schema_name == get_public_schema_name())):
+                func(*_args, **kwargs)
+
+        return wrapper
+
+    if len(args) == 1 and callable(args[0]):
+        return _tenant_migration(args[0])
+
+    return _tenant_migration
+
+
+def get_tenant(request):
+    """This gets the tenant object from the request"""
+    if hasattr(request, 'tenant'):
+        return request.tenant
+    return None

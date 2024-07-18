@@ -7,6 +7,7 @@ from django.core.management import call_command
 from django.db import connection, transaction
 from django.test.utils import override_settings
 
+from django_tenants.clone import CloneSchema
 from django_tenants.signals import schema_migrated, schema_migrate_message
 from dts_test_app.models import DummyModel, ModelWithFkToPublicUser
 
@@ -163,7 +164,11 @@ class TenantDataAndSettingsTest(BaseTestCase):
         self.created = [domain, tenant]
 
     def test_switching_search_path(self):
-        tenant1 = get_tenant_model()(schema_name='tenant1')
+        """
+        IMPORTANT: using schema_name with underscore here. See
+        https://github.com/django-tenants/django-tenants/pull/829
+        """
+        tenant1 = get_tenant_model()(schema_name='tenant`1')
         tenant1.save()
 
         domain1 = get_tenant_domain_model()(tenant=tenant1, domain='something.test.com')
@@ -171,7 +176,7 @@ class TenantDataAndSettingsTest(BaseTestCase):
 
         connection.set_schema_to_public()
 
-        tenant2 = get_tenant_model()(schema_name='tenant2')
+        tenant2 = get_tenant_model()(schema_name='Tenant_2')
         tenant2.save()
 
         domain2 = get_tenant_domain_model()(tenant=tenant2, domain='example.com')
@@ -309,7 +314,7 @@ class TenantDataAndSettingsTest(BaseTestCase):
 
     def test_tenant_schema_creation_with_special_chars(self):
         """Tests using special characters in schema name."""
-        schema_names = ('test-hyphen', 'test@at', 'test`backtick')
+        schema_names = ('test-hyphen', 'test@at', 'test`backtick', 'country_BD')
 
         Client = get_tenant_model()
         for schema_name in schema_names:
@@ -594,19 +599,65 @@ class TenantRenameSchemaTest(BaseTestCase):
         self.assertFalse(schema_exists('test'))
         self.assertTrue(schema_exists('new_name'))
 
-    # def test_clone_schema(self):
-    #     Client = get_tenant_model()
-    #     tenant = Client(schema_name='test')
-    #     tenant.save()
-    #     self.assertTrue(schema_exists(tenant.schema_name))
-    #
-    #     domain = get_tenant_domain_model()(tenant=tenant, domain='something.test.com')
-    #     domain.save()
-    #     clone_schema = CloneSchema()
-    #     clone_schema.clone_schema(base_schema_name='test', new_schema_name='new_name')
-    #
-    #     self.assertTrue(schema_exists('test'))
-    #     self.assertTrue(schema_exists('new_name'))
+    def test_rename_schema_numbers(self):
+        Client = get_tenant_model()
+        tenant = Client(schema_name='1234_test')
+        tenant.save()
+        self.assertTrue(schema_exists(tenant.schema_name))
+        domain = get_tenant_domain_model()(tenant=tenant, domain='something.test.com')
+        domain.save()
+        schema_rename(tenant=Client.objects.filter(pk=tenant.pk).first(), new_schema_name='4321_new_name')
+        self.assertFalse(schema_exists('1234_test'))
+        self.assertTrue(schema_exists('4321_new_name'))
+
+
+class CloneSchemaTest(BaseTestCase):
+    def test_clone_schema(self):
+        Client = get_tenant_model()
+        tenant = Client(schema_name='source')
+        tenant.save()
+        self.assertTrue(schema_exists(tenant.schema_name))
+
+        domain = get_tenant_domain_model()(tenant=tenant, domain='source.test.com')
+        domain.save()
+        clone_schema = CloneSchema()
+        clone_schema.clone_schema(base_schema_name='source', new_schema_name='destination')
+
+        self.assertTrue(schema_exists('source'))
+        self.assertTrue(schema_exists('destination'))
+
+    def test_clone_schema_with_existing_records_and_add_new_records_to_resulting_schema(self):
+        """
+        Exercises the scenario where the source schema contains records in a shared app which
+        get cloned in the destination schema but the value of the PK column remains at 1 which
+        causes duplicate key errors.
+        See https://github.com/django-tenants/django-tenants/issues/831
+        """
+        Client = get_tenant_model()
+        tenant = Client(schema_name='s1')
+        tenant.save()
+
+        domain = get_tenant_domain_model()(tenant=tenant, domain='s1.test.com')
+        domain.save()
+        self.assertTrue(schema_exists(tenant.schema_name))
+
+        # add some records to the source schema
+        with tenant_context(tenant):
+            self.assertFalse(DummyModel.objects.filter(name='Administrator').exists())
+            self.assertFalse(DummyModel.objects.filter(name='Tester').exists())
+            DummyModel(name='Administrator').save()
+            DummyModel(name='Tester').save()
+
+        clone_schema = CloneSchema()
+        clone_schema.clone_schema(base_schema_name='s1', new_schema_name='d1')
+        self.assertTrue(schema_exists('destination'))
+
+        # add some records to the destination schema
+        with schema_context('d1'):
+            self.assertTrue(DummyModel.objects.filter(name='Administrator').exists())
+            self.assertTrue(DummyModel.objects.filter(name='Tester').exists())
+
+            DummyModel(name='Moderator').save()
 
 
 class SchemaMigratedSignalTest(BaseTestCase):

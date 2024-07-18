@@ -105,7 +105,21 @@ You can also use `tenant_context` as a decorator.
     def my_func():
       # All commands in this function are ran under the schema from the `tenant` object
 
+.. function:: @tenant_migration
 
+This decorator allows the flexibility to have data migrations (using ``migrations.RunPython``) execute specifically under a tenant or public schema for apps in both tenant/public INSTALLED_APPS. 
+It accepts boolean kwargs ``tenant_schema`` or ``public_schema`` - the default beign ``tenant_schema=True`` and ``public_schema=False``.
+
+.. code-block:: python
+    # <users/migrations/0012_datamigration.py>
+    from django.db import migrations
+    from django_tenants.utils import tenant_migration
+
+    @tenant_migration
+    def create_dummy_users(apps, schema_editor):
+        User = apps.get_model("users", "User")
+        User.objects.get_or_create(username='test_user1', email='test_user1@gmail.com')
+        # creates user only in tenant schemas if migration is in app available in both public/tenant schemas
 
 Signals
 -------
@@ -154,7 +168,7 @@ Example
 Multi-types tenants
 -------------------
 
-It is also possible to have different types of tenants. This is useful if you have two different types of users for instance you might want customers to use one style of tenant and suppliers to use another style. There is no limit to the amount of types however once the tenant has been set to a type it can't easily be convert to another type.
+It is also possible to have different types of tenants. This is useful if you have two different types of users for instance you might want customers to use one style of tenant and suppliers to use another style. There is no limit to the amount of types however once the tenant has been set to a type it can't easily be converted to another type.
 To enable multi types you need to change the setting file and add an extra field onto the tenant table.
 
 In the setting file ```SHARED_APPS```, ```TENANT_APPS``` and ```PUBLIC_SCHEMA_URLCONF``` needs to be removed.
@@ -290,7 +304,35 @@ Or
 
     ./manage.py migrate_schemas myapp 0001_initial --fake
 
-in case you're just switching your ``myapp`` application to use South migrations.
+in case you're just switching your ``myapp`` application to use migrations.
+
+
+Running the ``migrate`` will work however all it does is forward over to ``migrate_schemas``.
+
+
+
+To run the migration only on the public tenant do the following.
+
+
+.. code-block:: bash
+
+    ./manage.py migrate_schemas --shared
+
+
+To exlclude running migration on the public do the following
+
+
+.. code-block:: bash
+
+    ./manage.py migrate_schemas --tenant
+ 
+
+To run only migration only on a single tenant run the following.
+
+.. code-block:: bash
+    
+    python manage.py migrate --schema="demo"
+    
 
 
 migrate_schemas in Parallel
@@ -340,7 +382,7 @@ To run any command on an every schema, you can use the special ``all_tenants_com
 
     ./manage.py all_tenants_command loaddata
 
-If the command you need to run on all tenants should not be run on the public tenant, you can specify the ``--no-public`` flag which whill exclude the public tenant.
+If the command you need to run on all tenants should not be run on the public tenant, you can specify the ``--no-public`` flag which will exclude the public tenant.
 
 .. code-block:: bash
 
@@ -369,7 +411,7 @@ The command ``create_tenant`` creates a new schema
 
 The argument are dynamic depending on the fields that are in the ``TenantMixin`` model.
 For example if you have a field in the ``TenantMixin`` model called company you will be able to set this using --company=MyCompany.
-If no argument are specified for a field then you be promted for the values.
+If no argument are specified for a field then you be prompted for the values.
 There is an additional argument of -s which sets up a superuser for that tenant.
 
 
@@ -456,7 +498,7 @@ When set, ``django-tenants`` will set the search path only once per request. The
 Extra Set Tenant Method
 -----------------------
 
-Sometime you might want to do something special when you switch to another schema / tenant such as read replica.
+Sometimes you might want to do something special when you switch to another schema / tenant such as read replica.
 Add ``EXTRA_SET_TENANT_METHOD_PATH`` to the settings file and point a method.
 
 .. code-block:: python
@@ -473,6 +515,37 @@ example
 
     def extra_set_tenant_stuff(wrapper_class, tenant):
         pass
+
+
+Get Executor Function
+-----------------------
+
+Sometimes you might want to have some custom functionality with your migration executor.
+Add ``GET_EXECUTOR_FUNCTION`` to the settings file and point a method.
+
+.. code-block:: python
+
+    GET_EXECUTOR_FUNCTION = 'tenant_multi_types_tutorial.set_tenant_utils.get_custom_executor'
+
+The function
+~~~~~~~~~~
+
+The function takes 1 keyword argument (default=None) for the executor codename and returns a MigrationExector class.
+example
+
+.. code-block:: python
+    from .custom_migration_executors import CustomMigrationExecutor
+    from django_tenants.migrate_executors.standard import StandardExecutor
+
+    def get_custom_executor(codename=None):
+        codename = codename or os.environ.get('EXECUTOR', StandardExecutor.codename)
+
+        for klass in MigrationExecutor.__subclasses__():
+            if klass.codename == codename:
+                return klass
+
+        raise NotImplementedError('No executor with codename %s' % codename)
+
 
 Logging
 -------
@@ -506,6 +579,20 @@ This will result in logging output that looks similar to:
 .. code-block:: text
 
     [example:example.com] DEBUG 13:29 django.db.backends: (0.001) SELECT ...
+
+
+Get Tenant
+----------
+
+If you need to access the tenant object and have access to the request object you can do the following.
+
+.. code-block:: python
+
+    from django_tenants.utils import get_tenant
+    ...
+    tenant = get_tenant(request)
+
+If no tenant is found None will be returned
 
 
 Running in Development
